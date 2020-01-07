@@ -9,7 +9,7 @@ config_file="${config_path}/bkserver.properties"
 python_executable=$(which python3)
 
 action=""
-if [ "$1" == "" ]; then
+if [ "$1" = "" ]; then
   action="start"
 else
   action="$1"

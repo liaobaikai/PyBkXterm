@@ -322,7 +322,7 @@ def startup():
     # 查看端口是否被占用
     server.server_activate()
     # 不是Windows系统的话，切换到守护进程
-    #if hasattr(os, "fork"):
+    # if hasattr(os, "fork"):
     #    daemon(get_pid_file())
     # 启动服务器
     try:
@@ -455,7 +455,15 @@ class WebSocketRequestHandler(BaseRequestHandler):
         """
         print(data)
         # 从请求的数据中获取 Sec-WebSocket-Key, Upgrade
-        maps = Properties(separator=':', ignore_case=True).load(str(data, encoding='ascii'))
+
+        try:
+            request_header = str(data, encoding='ascii')
+        except UnicodeDecodeError:
+            access_logger.error('WS] handshake fail of decode error!')
+            self.keep_alive = False
+            return
+
+        maps = Properties(separator=':', ignore_case=True).load(request_header)
         if get_value(maps, 'upgrade') is None:
             access_logger.error('WS] Client tried to connect but was missing upgrade!')
             self.keep_alive = False
@@ -718,7 +726,6 @@ class WebSocketRequestHandler(BaseRequestHandler):
                 self.connect_terminal(user_data)
                 return
             if 'size' in user_data:
-
                 access_logger.debug('size:', user_data)
 
                 size = get_value(user_data, 'size')
@@ -900,6 +907,7 @@ class SSHClient:
 
     # heartbeat 心跳时间(s)
     def __init__(self, args=None, heartbeat=30):
+        paramiko.util.log_to_file('paramiko.log')
         self.ssh = paramiko.SSHClient()
         self.ssh.load_system_host_keys()
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy)
@@ -921,12 +929,17 @@ class SSHClient:
 
             transport = self.ssh.get_transport()  # type: paramiko.Transport
 
-            rsa_key = paramiko.RSAKey.generate(2048)
+            # rsa_key = paramiko.RSAKey.generate(2048)
 
-            print(rsa_key.key)
+            # print(rsa_key.key)
 
-            transport.add_server_key(rsa_key)
-            print(transport.get_server_key())
+            # transport.add_server_key(rsa_key)
+            # print(transport.get_server_key())
+
+            # stdin, stdout, stderr = self.ssh.exec_command('export LANG=zh_CN.UTF-8')
+            # stdin, stdout, stderr = self.ssh.exec_command('date', environment={'LANG': 'zh_CN.UTF-8'})
+            #
+            # print(stdout.read())
 
         except paramiko.BadHostKeyException:
             error_msg = {'status': 'fail',
@@ -961,6 +974,9 @@ class SSHClient:
         self.chan = self.ssh.invoke_shell(get_value(self.args, 'term'),
                                           get_value(self.args, 'width'),
                                           get_value(self.args, 'height'))  # type: paramiko.Channel
+        # 如果设置了env
+        # self.chan.send('export LANG=zh_CN.UTF-8\r')
+
         self.chan.setblocking(True)
         self.chan.send_exit_status(0)
 

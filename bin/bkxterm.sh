@@ -15,5 +15,6 @@ else
   action="$1"
 fi
 
-$python_executable "${bin_path}/bkxtermserver.py" -D.config.file=${config_file} $action
+$python_executable  "${bin_path}/bkxtermserver.py" -D.config.file=${config_file} $action
 
+# python3 -m cProfile -s cumulative bkxtermserver.py

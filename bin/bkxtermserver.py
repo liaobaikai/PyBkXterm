@@ -8,8 +8,8 @@ import socket
 import struct
 import time
 import selectors
-import traceback
 import logging
+from logging.handlers import RotatingFileHandler
 from base64 import b64encode
 from hashlib import sha1
 from queue import Queue
@@ -32,6 +32,13 @@ __author__ = 'lbk <baikai.liao@qq.com>'
 __version__ = '0.2'
 __status__ = "production"
 __date__ = "2019-11-18"
+
+#########################################
+#
+# BkXtermServer
+# WebSocketRequestHandler
+#
+
 
 server_base_path = os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[0])))
 shutdown_bind_address = "localhost"
@@ -231,30 +238,38 @@ def get_access_log():
     return get_log_file('access_log', 'access.log')
 
 
+def get_info_log():
+    return get_log_file('info_log', 'info.log')
+
+
 pid_file = get_pid_file()
 access_log = get_access_log()
 error_log = get_error_log()
+info_log = get_info_log()
 
 log_date_fmt = '%Y-%m-%d %H:%M:%S'
 log_file_mode = 'w+'
-log_level = 'NOTSET'
+log_level = 'FATAL'
 log_format = '%(asctime)s - %(module)s.%(funcName)s[line:%(lineno)d] - %(levelname)s: %(message)s'
 
-log_levels = {
-    'NOTSET': logging.NOTSET,
-    'DEBUG': logging.DEBUG,
-    'INFO': logging.INFO,
-    'WARN': logging.WARN,
-    'WARNING': logging.WARNING,
-    'ERROR': logging.ERROR,
-    'FATAL': logging.FATAL,
-    'CRITICAL': logging.CRITICAL
-}
-
-logging.basicConfig(level=log_levels[log_level], format=log_format)
 error_logger = logging.getLogger(__name__)
-access_logger = logging.getLogger(__name__)
 info_logger = logging.getLogger(__name__)
+
+errorLoggerHandler = RotatingFileHandler(error_log)
+errorLoggerHandler.setLevel("NOTSET")
+infoLoggerHandler = RotatingFileHandler(info_log)
+infoLoggerHandler.setLevel("NOTSET")
+
+info_filter = logging.Filter()
+info_filter.filter = lambda record: record.levelno < logging.WARNING  # 设置过滤等级
+
+err_filter = logging.Filter()
+err_filter.filter = lambda record: record.levelno >= logging.WARNING
+
+info_logger.addHandler(infoLoggerHandler)
+info_logger.addFilter(info_filter)
+
+error_logger.addHandler(errorLoggerHandler)
 
 
 # 获取数据解密私钥
@@ -282,7 +297,7 @@ def decode_utf8(data, flag='ignore', replace_str=''):
                 result += (bytes([r]).decode(encoding='utf-8'))
                 last_except = False
             except UnicodeDecodeError as ude:
-                access_logger.warning(ude)
+                error_logger.warning(ude)
                 if last_except is False:
                     if flag == 'ignore':
                         result += ''
@@ -370,7 +385,6 @@ def shutdown():
             print_base_info()
             print('ERROR: Could not contact [%s:%s]. Server may not be running.'
                   % (shutdown_bind_address, shutdown_port))
-            print(traceback.format_exc())
 
 
 # 检查主服务器的健康状态
@@ -453,24 +467,23 @@ class WebSocketRequestHandler(BaseRequestHandler):
         :param data: bytes
         :return:
         """
-        print(data)
         # 从请求的数据中获取 Sec-WebSocket-Key, Upgrade
 
         try:
             request_header = str(data, encoding='ascii')
         except UnicodeDecodeError:
-            access_logger.error('WS] handshake fail of decode error!')
+            error_logger.error('WS] handshake fail of decode error!')
             self.keep_alive = False
             return
 
         maps = Properties(separator=':', ignore_case=True).load(request_header)
         if get_value(maps, 'upgrade') is None:
-            access_logger.error('WS] Client tried to connect but was missing upgrade!')
+            error_logger.error('WS] Client tried to connect but was missing upgrade!')
             self.keep_alive = False
             return
         sw_key = get_value(maps, 'sec-websocket-key')
         if sw_key is None:
-            access_logger.error('WS] Client tried to connect but was missing a key!')
+            error_logger.error('WS] Client tried to connect but was missing a key!')
             self.keep_alive = False
             return
         hash_value = sha1(sw_key.encode() + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
@@ -478,17 +491,25 @@ class WebSocketRequestHandler(BaseRequestHandler):
         resp_body = HANDSHAKE_RESPONSE_HEADER.format(resp_key).encode()
         self.handshake_done = self.request.send(resp_body)
         if self.handshake_done > 0:
-            access_logger.info('WS] handshake success...')
+            info_logger.debug('WS] handshake success...')
             self.server.new_client(self)
 
     # 读取客户端传过来的数据
     def read_message(self):
         try:
+
+            # 客户端
             message = self.request.recv(socket_buffer_size)
+
+            if not message:
+                print("客户端已断开", self.request)
+                self.keep_alive = False
+                return
 
             self.read_pos = 0
 
             if self.handshake_done is False:
+                print("handshake....")
                 self.handshake(message)
             else:
                 # 解析文本
@@ -497,7 +518,7 @@ class WebSocketRequestHandler(BaseRequestHandler):
                     self.read_pos -= 1
                     decoded = self.unpack_message(message)
                     self.handle_decoded(decoded)
-                # print('read next....')
+                    # print('read next....')
 
         except (ConnectionAbortedError, ConnectionResetError, TimeoutError) as es:
             # [Errno 54] Connection reset by peer
@@ -520,15 +541,15 @@ class WebSocketRequestHandler(BaseRequestHandler):
         payload_length = b2 & PAYLOAD_LEN
 
         if not b1:
-            access_logger.error('WS] Client closed connection.')
+            error_logger.error('WS] Client closed connection.')
             self.keep_alive = False
             return
         if opcode == CLOSE_CONN:
-            access_logger.error('WS] Client closed connection.')
+            error_logger.error('WS] Client closed connection.')
             self.keep_alive = False
             return
         if not masked:
-            access_logger.error('WS] Client must always be masked.')
+            error_logger.error('WS] Client must always be masked.')
             self.keep_alive = False
             return
 
@@ -611,7 +632,9 @@ class WebSocketRequestHandler(BaseRequestHandler):
             self.resp_closed_message('\x1b^close\x07')
 
         if data is not None and len(data) > 0:
-            access_logger.debug(data)
+            info_logger.debug(data)
+
+            print(data)
 
             self.queue.put(data, block=queue_blocking)
             # 将事件类型改成selectors.EVENT_WRITE
@@ -642,9 +665,8 @@ class WebSocketRequestHandler(BaseRequestHandler):
             self.selector.register(self.ssh_client.chan, selectors.EVENT_READ)
             return
 
-        print('chan.send_ready(): ', chan.send_ready())
         if chan.send_ready():
-            access_logger.debug(cmd)
+            info_logger.debug(cmd)
             chan.send(cmd)
             self.heartbeat_time = time.time()
         else:
@@ -655,7 +677,7 @@ class WebSocketRequestHandler(BaseRequestHandler):
 
     # shutdown请求
     def shutdown_request(self):
-        access_logger.info('SD_SERVER] shutdown request...')
+        info_logger.info('SD_SERVER] shutdown request...')
         self.keep_alive = False
         try:
             ssh = self.ssh_client.ssh  # type: paramiko.SSHClient
@@ -709,9 +731,8 @@ class WebSocketRequestHandler(BaseRequestHandler):
         """
         if decoded is None:
             return
-        # print('handle_decoded: ', decoded)
+        print('handle_decoded: ', decoded)
         try:
-            print('decoded', decoded)
 
             # 通过私钥解密数据
             # try:
@@ -726,12 +747,12 @@ class WebSocketRequestHandler(BaseRequestHandler):
                 self.connect_terminal(user_data)
                 return
             if 'size' in user_data:
-                access_logger.debug('size:', user_data)
+                info_logger.debug('size:', user_data)
 
                 size = get_value(user_data, 'size')
                 width = get_int_value(size, 'w', 80)
                 height = get_int_value(size, 'h', 24)
-                access_logger.debug('size: w{},h{}'.format(width, height))
+                info_logger.debug('size: w{},h{}'.format(width, height))
 
                 self.ssh_client.chan.resize_pty(width=width, height=height)
             if 'cmd' in user_data:
@@ -764,11 +785,11 @@ class WebSocketRequestHandler(BaseRequestHandler):
         :param message: dict
         """
         target = get_value(message, 'target')
-        access_logger.debug(self.request.getpeername())
-        access_logger.debug(message)
+        info_logger.debug(self.request.getpeername())
+        info_logger.debug(message)
 
         if target is None:
-            access_logger.error('无效的主机信息！！！')
+            error_logger.error('无效的主机信息！！！')
         else:
             # 连接终端
             size = get_value(message, 'size')
@@ -868,8 +889,6 @@ class BkXtermServer(_TCPServer):
             if handler == shutdown_handler:
                 self.clients.remove(client)
                 break
-        print(self.id_counter)
-        print(self.clients)
 
     def server_activate(self):
         super().server_activate()
@@ -907,7 +926,6 @@ class SSHClient:
 
     # heartbeat 心跳时间(s)
     def __init__(self, args=None, heartbeat=30):
-        paramiko.util.log_to_file('paramiko.log')
         self.ssh = paramiko.SSHClient()
         self.ssh.load_system_host_keys()
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy)
@@ -971,9 +989,10 @@ class SSHClient:
             # 需要重新连接
             self.connect()
 
-        self.chan = self.ssh.invoke_shell(get_value(self.args, 'term'),
-                                          get_value(self.args, 'width'),
-                                          get_value(self.args, 'height'))  # type: paramiko.Channel
+        print("终端尺寸：width=" + str(get_value(self.args, 'width')) + ", height=" + str(get_value(self.args, 'height')))
+        self.chan = self.ssh.invoke_shell(term=get_value(self.args, 'term'),
+                                          width=get_value(self.args, 'width'),
+                                          height=get_value(self.args, 'height'))  # type: paramiko.Channel
         # 如果设置了env
         # self.chan.send('export LANG=zh_CN.UTF-8\r')
 
@@ -989,7 +1008,6 @@ class SSHClient:
     def get_ssh_info(self):
         # 获取版本号
         transport = self.ssh.get_transport()  # type: paramiko.Transport
-        print(transport.get_banner())
 
         remote_version, remote_client = check_banner(transport.remote_version)
 
